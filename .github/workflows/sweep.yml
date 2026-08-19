@@ -10,9 +10,12 @@
 # and a near-continuous sweeper burns the free tier in days. Public
 # repositories are unlimited, hence this one.
 #
-# Each run ticks for ~18 minutes; scheduled every 15 with a concurrency group
-# holding one run in the queue, so coverage is near-continuous even with
-# GitHub's delays. Overlap is harmless - the tick's request budget is claimed
+# Each run ticks for ~27 minutes against a schedule of every 15. Measured on
+# the first afternoon: GitHub fires the schedule 25-30 minutes apart in
+# practice, so an 18-minute run left ~15-minute dead gaps between runs and the
+# big boards crawled. Runs longer than the real firing interval close the gap;
+# the concurrency group queues at most one run behind the current one, and
+# overlap is harmless anyway - the tick's request budget is claimed
 # atomically, and a tick finding the budget spent returns at once.
 name: Sweep
 
@@ -28,13 +31,13 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 22
+    timeout-minutes: 31
     steps:
-      - name: Tick for eighteen minutes
+      - name: Tick for twenty-seven minutes
         env:
           CRON_KEY: ${{ secrets.CRON_SECRET }}
         run: |
-          END=$(( $(date +%s) + 1080 ))
+          END=$(( $(date +%s) + 1620 ))
           i=0
           while [ "$(date +%s)" -lt "$END" ]; do
             i=$((i+1))

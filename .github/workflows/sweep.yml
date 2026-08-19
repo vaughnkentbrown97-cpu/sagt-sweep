@@ -1,0 +1,58 @@
+# Wakes the sweeper, continuously.
+#
+# This lived in the private SAGT-APP repository first, as short runs on a
+# five-minute schedule. Two things were wrong with that. GitHub throttles
+# schedules to roughly every twenty-five minutes in practice, and each run
+# ticked for only five - so the sweeper worked at about a tenth of its duty
+# cycle, and a 200-page board took half a day to re-sweep. The boards read
+# "15 hours ago" on the live site, which is where this was noticed. And longer
+# runs were not an option there: private repositories pay for Actions minutes,
+# and a near-continuous sweeper burns the free tier in days. Public
+# repositories are unlimited, hence this one.
+#
+# Each run ticks for ~18 minutes; scheduled every 15 with a concurrency group
+# holding one run in the queue, so coverage is near-continuous even with
+# GitHub's delays. Overlap is harmless - the tick's request budget is claimed
+# atomically, and a tick finding the budget spent returns at once.
+name: Sweep
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sweep
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - name: Tick for eighteen minutes
+        env:
+          CRON_KEY: ${{ secrets.CRON_SECRET }}
+        run: |
+          END=$(( $(date +%s) + 1080 ))
+          i=0
+          while [ "$(date +%s)" -lt "$END" ]; do
+            i=$((i+1))
+            code=$(curl -s -o /tmp/tick.json -w '%{http_code}' \
+              --max-time 70 \
+              -H "x-cron-key: $CRON_KEY" \
+              https://sagt-api.vercel.app/api/tick || echo 000)
+            echo "tick $i -> HTTP $code"
+            if [ "$code" != "200" ]; then
+              echo "::error::sweep tick $i returned HTTP $code"
+              exit 1
+            fi
+            if [ -s /tmp/tick.json ]; then
+              python3 -c "import json;d=json.load(open('/tmp/tick.json'));print('   ',d.get('did'),'| pages',d.get('pages'),'|',' / '.join(d.get('log',[])))" 2>/dev/null || true
+            fi
+            # A tick with work takes ~35-95s on its own; this spaces them so
+            # each lands in a fresh slice of the request budget rather than
+            # hammering an empty ledger.
+            if [ "$(date +%s)" -lt "$END" ]; then sleep 25; fi
+          done
+          echo "ran $i ticks"

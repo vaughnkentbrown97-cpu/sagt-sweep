@@ -37,19 +37,50 @@ jobs:
         env:
           CRON_KEY: ${{ secrets.CRON_SECRET }}
         run: |
+          # A single flaky request used to fail the whole run. Measured over
+          # fifteen runs: fourteen were clean and one hit tick 7 with curl's
+          # own 000 - no response reached the client at all, a transport blip
+          # on GitHub's runner or the network between it and Vercel, not
+          # anything sagt-api said. The service answered 200 in under two
+          # seconds both immediately before and immediately after. Exiting on
+          # that one request threw away six good ticks and paged as "all jobs
+          # have failed", which is the wrong alarm for the wrong problem: it
+          # reports network jitter as a service outage.
+          #
+          # A tick is now retried once, a few seconds later, before being
+          # counted as failed - the same request usually just works the second
+          # time. Only a RUN of failures (three in a row, after retries) means
+          # the service is actually down rather than the network having a bad
+          # moment, and that is the one case still worth failing loudly for.
           END=$(( $(date +%s) + 1620 ))
           i=0
+          consecutive_failures=0
           while [ "$(date +%s)" -lt "$END" ]; do
             i=$((i+1))
             code=$(curl -s -o /tmp/tick.json -w '%{http_code}' \
               --max-time 70 \
               -H "x-cron-key: $CRON_KEY" \
               https://sagt-api.vercel.app/api/tick || echo 000)
+            if [ "$code" != "200" ]; then
+              echo "tick $i -> HTTP $code, retrying once"
+              sleep 8
+              code=$(curl -s -o /tmp/tick.json -w '%{http_code}' \
+                --max-time 70 \
+                -H "x-cron-key: $CRON_KEY" \
+                https://sagt-api.vercel.app/api/tick || echo 000)
+            fi
             echo "tick $i -> HTTP $code"
             if [ "$code" != "200" ]; then
-              echo "::error::sweep tick $i returned HTTP $code"
-              exit 1
+              consecutive_failures=$((consecutive_failures+1))
+              echo "::warning::sweep tick $i failed twice in a row (HTTP $code) - $consecutive_failures consecutive"
+              if [ "$consecutive_failures" -ge 3 ]; then
+                echo "::error::three ticks in a row have failed after retry - the service may actually be down"
+                exit 1
+              fi
+              if [ "$(date +%s)" -lt "$END" ]; then sleep 25; fi
+              continue
             fi
+            consecutive_failures=0
             if [ -s /tmp/tick.json ]; then
               python3 -c "import json;d=json.load(open('/tmp/tick.json'));print('   ',d.get('did'),'| pages',d.get('pages'),'|',' / '.join(d.get('log',[])))" 2>/dev/null || true
             fi

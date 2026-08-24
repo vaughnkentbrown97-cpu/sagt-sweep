@@ -10,13 +10,26 @@
 # and a near-continuous sweeper burns the free tier in days. Public
 # repositories are unlimited, hence this one.
 #
-# Each run ticks for ~27 minutes against a schedule of every 15. Measured on
-# the first afternoon: GitHub fires the schedule 25-30 minutes apart in
-# practice, so an 18-minute run left ~15-minute dead gaps between runs and the
-# big boards crawled. Runs longer than the real firing interval close the gap;
-# the concurrency group queues at most one run behind the current one, and
-# overlap is harmless anyway - the tick's request budget is claimed
-# atomically, and a tick finding the budget spent returns at once.
+# Each run ticks for most of six hours against a schedule of every 15 minutes.
+#
+# The 27-minute version of this assumed GitHub fires the schedule 25-30
+# minutes apart. Measured across a full morning on 2026-08-24, it fired 30,
+# 37, 44, 46, 50, 58 and 71 minutes apart - so a 27-minute run left the
+# sweeper unconscious for 191 of 454 minutes, 42% of the window, with a
+# 44-minute hole in the middle of it. Boards read "390 minutes ago" on a site
+# whose whole promise is that they do not.
+#
+# A run has to outlast the worst firing gap, not the average one, or the gap
+# is simply reintroduced on the bad days. Six hours is the ceiling GitHub
+# allows a job, so the run takes the ceiling minus a margin, and the
+# concurrency group holds exactly one run pending behind the current one -
+# which starts the moment this one ends. That is a continuous duty cycle from
+# a schedule that cannot be relied on to fire.
+#
+# This does not sweep harder, and it must not be mistaken for a way to. The
+# request budget is claimed atomically and a tick that finds it spent returns
+# at once, so the ceiling on work is unchanged - the run length only decides
+# how much of the hour there is anybody awake to spend it.
 name: Sweep
 
 on:
@@ -31,9 +44,12 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 31
+    # GitHub's hard ceiling for a job is 360 minutes; this leaves the loop
+    # room to finish its last tick and exit cleanly rather than being killed
+    # mid-request, which reads as a failed run.
+    timeout-minutes: 355
     steps:
-      - name: Tick for twenty-seven minutes
+      - name: Tick until the next run is due
         env:
           CRON_KEY: ${{ secrets.CRON_SECRET }}
         run: |
@@ -52,7 +68,9 @@ jobs:
           # time. Only a RUN of failures (three in a row, after retries) means
           # the service is actually down rather than the network having a bad
           # moment, and that is the one case still worth failing loudly for.
-          END=$(( $(date +%s) + 1620 ))
+          # 5h45m. Ten minutes inside timeout-minutes so the loop, not the
+          # runner, decides when this run is over.
+          END=$(( $(date +%s) + 20700 ))
           i=0
           consecutive_failures=0
           while [ "$(date +%s)" -lt "$END" ]; do

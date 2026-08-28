@@ -1,0 +1,26 @@
+app = "sagt-tick"
+primary_region = "jnb"
+
+# ONE MACHINE, and this is a design decision rather than a missing redundancy
+# setting. Every instance would run its own loop, and two loops do not share
+# the work - they ask for it twice. The tick's request budget is claimed
+# atomically so nothing would be corrupted or overspent upstream, but the
+# second machine buys nothing and doubles the Vercel invocations. Deploy with
+# `--ha=false` and keep `fly scale count 1`.
+
+[build]
+
+[env]
+  TICK_URL = "https://sagt-api.vercel.app/api/tick"
+  # A tick returns the moment it finds the request budget spent, so the gap is
+  # not a rate limit - it is just enough spacing that each tick lands in a
+  # fresh slice of the window rather than hammering an empty ledger. 25s is
+  # what the Actions workflow used and what was measured saturating the budget.
+  GAP_SECONDS = "25"
+
+# No [http_service]: this serves nothing and needs no public address. A machine
+# with no services is never auto-stopped, which is the entire point of it.
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

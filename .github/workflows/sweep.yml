@@ -34,6 +34,10 @@ name: Sweep
 
 on:
   schedule:
+    # The backstop, not the mechanism. Each run starts the next one itself
+    # (see the hand-off step); this only restarts the chain if a run dies in a
+    # way that skips the hand-off, and re-arms it after GitHub disables the
+    # schedule on an inactive repository.
     - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
@@ -44,6 +48,11 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
+    # To start the next run itself. See the hand-off step at the bottom: the
+    # schedule cannot be relied on to fire, so each run queues its successor
+    # rather than hoping GitHub remembers.
+    permissions:
+      actions: write
     # GitHub's hard ceiling for a job is 360 minutes; this leaves the loop
     # room to finish its last tick and exit cleanly rather than being killed
     # mid-request, which reads as a failed run.
@@ -108,3 +117,28 @@ jobs:
             if [ "$(date +%s)" -lt "$END" ]; then sleep 25; fi
           done
           echo "ran $i ticks"
+
+      # Start the next run before this one ends.
+      #
+      # Every gap this workflow has ever left came from waiting for GitHub to
+      # fire the schedule. Measured on 2026-08-27/28: a */15 schedule firing 30,
+      # 37, 44, 46, 50, 58 and 71 minutes apart, then 2 to 4.6 hour gaps once
+      # the runs got long - 34% of the day with nothing sweeping. The cost is
+      # not only lost pages: the upstream session lasts an hour and is renewed
+      # inside a tick, so a long enough gap kills the credential and it stays
+      # dead until somebody notices.
+      #
+      # A run that is already going does not have to wait to be scheduled. It
+      # queues its own successor, the concurrency group holds it until this one
+      # finishes, and it starts within seconds of that. The chain is the
+      # mechanism; the cron above is only what restarts it if a link breaks.
+      #
+      # always(), so a run that failed still hands over. A broken tick is a
+      # reason to try again, not a reason to stop trying forever - and without
+      # this, one bad run would leave the sweeper dark until the schedule
+      # happened to fire.
+      - name: Hand off to the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run sweep.yml --repo "$GITHUB_REPOSITORY"
